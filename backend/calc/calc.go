@@ -173,9 +173,22 @@ func div(a, b decimal.Decimal) (decimal.Decimal, error) {
 	if b.IsZero() {
 		return decimal.Decimal{}, ErrDivideByZero
 	}
-	// Compute the quotient carrying guard digits, then round exactly once to
-	// Precision significant digits at the output boundary.
-	q := a.DivRound(b, workPrecision)
+	// Carry the intermediate at workPrecision *significant* digits, not a fixed
+	// number of decimal places. A small-magnitude quotient (|q| << 1) has its
+	// most-significant digit far below the decimal point, so a fixed-place
+	// DivRound would discard real significant digits before the boundary round
+	// ever sees them — 1/1e50 would collapse to 0. We estimate the quotient's
+	// adjusted exponent from the operands (exact to within 1, which the guard
+	// digits absorb) and convert "workPrecision significant digits" into the
+	// equivalent decimal-place count: places = workPrecision - 1 - qAdjExp.
+	// Clamp so that |q| >= 1 keeps the original place count — those results were
+	// already correct and must stay byte-identical. Rounding still happens
+	// exactly once, at the boundary, half-to-even.
+	places := workPrecision - 1 - (adjustedExponent(a) - adjustedExponent(b))
+	if places < workPrecision {
+		places = workPrecision
+	}
+	q := a.DivRound(b, places)
 	return roundSignificant(q, Precision), nil
 }
 
@@ -264,9 +277,16 @@ func roundSignificant(d decimal.Decimal, sig int32) decimal.Decimal {
 	if d.IsZero() {
 		return decimal.Zero
 	}
-	adjExp := d.Exponent() + int32(d.NumDigits()) - 1
-	places := sig - 1 - adjExp
+	places := sig - 1 - adjustedExponent(d)
 	return d.RoundBank(places)
+}
+
+// adjustedExponent returns the power of ten of d's most-significant digit (its
+// order of magnitude). It reads only the exponent and digit count, so it never
+// materializes the coefficient. Behaviour for d == 0 is unspecified (callers
+// guard zero separately).
+func adjustedExponent(d decimal.Decimal) int32 {
+	return d.Exponent() + int32(d.NumDigits()) - 1
 }
 
 // stripTrailingZeros returns d with trailing zeros in the fractional part

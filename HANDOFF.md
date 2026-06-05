@@ -100,6 +100,74 @@ everything else were deliberately left untouched.
 
 ---
 
+## Post-audit fix — Finding B (small-magnitude precision loss)
+
+The audit found that `divide` (and the negative-integer-power path that routes
+through it) lost significant digits for results with `|value| < ~1e-16`, and
+returned a wrong `0` below ~1e-44:
+
+- `1/3e30` → 14 sig figs (want 28); `2^-120` → 8 sig figs (want 28)
+- `1/1e50` → `"0"` (wrong; true value 1e-50); `1/1e1000` → `"0"` (wrong)
+- `|value| >= 1` was already correct and had to stay byte-identical.
+
+**Root cause.** `div` carried the intermediate at a *fixed* `workPrecision`
+**decimal-place** count (`DivRound(b, 44)`). Significant-digit precision must
+scale with where the result's most-significant digit falls; a fixed place count
+discards real significant digits *before* `roundSignificant` runs, and the
+boundary round cannot recover what was already gone.
+
+**Fix (surgical, `calc/calc.go`, `div` only).** Intermediate precision is now
+**significant-digit-relative** to the quotient's exponent. We estimate the
+quotient's adjusted exponent from the operands —
+`qAdjExp ≈ adjustedExponent(a) - adjustedExponent(b)`, exact to within 1, which
+the 16 guard digits absorb — and convert "workPrecision significant digits" into
+the equivalent place count:
+
+```
+places = workPrecision - 1 - qAdjExp     // sig-fig-relative
+if places < workPrecision { places = workPrecision }   // clamp: |q| >= 1 unchanged
+q := a.DivRound(b, places)
+```
+
+The clamp guarantees results of magnitude `>= ~1` use the original place count,
+so every previously-correct case is **byte-identical**. For small magnitudes,
+`places` grows with the exponent, so the intermediate always carries ≥ 28 real
+sig figs for the single boundary round (still rounding **only at the boundary**,
+**half-to-even**). A factored-out `adjustedExponent` helper (also now used by
+`roundSignificant`) reads only the exponent + digit count, so it never
+materializes a coefficient — the Finding-C DoS guard is untouched and still
+bounds `places` (operands are capped at 1e±1000, so `places` is bounded too).
+The **float64/fractional-power** question, the **405 body**, and the **DoS
+guard** were left exactly as they were.
+
+**Confirmed (live + tests):**
+
+| Case | Before | After |
+|---|---|---|
+| `1/3e30` | 14 sig figs | **28 sig figs** |
+| `2^-120` | 8 sig figs | **28 sig figs** (matches true value, 29th digit 2 → rounds down) |
+| `1/1e50` | `"0"` | **`1e-50`** (exact, 1 sig fig — see note) |
+| `1/1e1000` | `"0"` | **`1e-1000`** (exact, 1 sig fig) |
+| `1/3`, `2/3`, `100/3`, `√2`, `3^-1`, `2^-1` | — | **byte-identical** |
+
+Property check: `(1/x)*x` reconstructs 1 within 1e-26 across magnitudes
+(`TestDivideRoundTrip`).
+
+**Note / flag for the evaluator (faithful to the math, not the ticket wording).**
+`1/1e50` and `1/1e1000` are *exact* powers of ten — `1e-50` and `1e-1000` — with
+**one** significant figure, not 28. The bug was that they returned `0`; the fix
+returns the correct nonzero value. Tests assert exactly-28 figs only for the
+genuinely non-terminating cases (`1/3e30`, `2^-120`) and the *correct exact
+value* for the powers of ten; asserting 28 figs on an exact 1-fig value would be
+mathematically wrong (CLAUDE.md: never silently deviate). The `precision`
+response field reports the true sig-fig count, so it reads `1` for these.
+
+Tests added: `TestSmallMagnitudePrecision`, `TestDivideRoundTrip` (calc),
+`TestSmallMagnitudePrecision_HTTP` (httpapi). `go test -race ./...` and
+`go vet ./...` clean; calc coverage **94.6%**.
+
+---
+
 ## Decisions the SPEC left open (please scrutinize)
 
 ### 1. "28 significant digits" vs "28 decimal places" — I chose **significant digits**

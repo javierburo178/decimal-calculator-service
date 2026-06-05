@@ -216,6 +216,84 @@ func TestMagnitudeGuard(t *testing.T) {
 	}
 }
 
+// TestSmallMagnitudePrecision is the regression for Finding B: small-magnitude
+// quotients must keep full significant precision and never collapse to 0 or
+// shed significant digits. Intermediate precision is now significant-digit-
+// relative to the quotient's exponent (see div), so the single boundary round
+// always sees a full 28 sig figs. This also covers the negative-integer-power
+// path, which routes through div.
+func TestSmallMagnitudePrecision(t *testing.T) {
+	// Genuinely non-terminating small results: must carry exactly 28 sig figs.
+	nonTerminating := []struct {
+		name string
+		op   Operation
+		a, b string
+	}{
+		{"1 / 3e30 (non-terminating)", Divide, "1", "3e30"},
+		{"2 ** -120 (terminates at ~84 figs, capped to 28)", Power, "2", "-120"},
+	}
+	for _, tc := range nonTerminating {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Calculate(tc.op, dec(t, tc.a), dec(t, tc.b))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.IsZero() {
+				t.Fatalf("%s collapsed to 0 (the Finding B bug)", tc.name)
+			}
+			if n := got.NumDigits(); int32(n) != Precision {
+				t.Fatalf("%s = %s carries %d sig figs, want exactly %d", tc.name, got, n, Precision)
+			}
+		})
+	}
+
+	// Exact powers of ten: 1/1eN is exactly 1e-N — ONE significant figure, not
+	// 28. The bug returned "0"; the fix must return the correct nonzero value.
+	// Asserting 28 figs here would be mathematically wrong (CLAUDE.md: never
+	// silently deviate from the math), so we assert the exact value instead.
+	exact := []struct {
+		name string
+		a, b string
+		want decimal.Decimal
+	}{
+		{"1 / 1e50 -> exact 1e-50", "1", "1e50", decimal.New(1, -50)},
+		{"1 / 1e1000 -> exact 1e-1000 (at the magnitude-guard limit)", "1", "1e1000", decimal.New(1, -1000)},
+	}
+	for _, tc := range exact {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Calculate(Divide, dec(t, tc.a), dec(t, tc.b))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.IsZero() {
+				t.Fatalf("%s collapsed to 0 (the Finding B bug)", tc.name)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("%s = %s, want %s", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDivideRoundTrip is a property check: for a range of magnitudes, (1/x)*x
+// reconstructs 1 to within the retained precision. Before the fix, 1/x for
+// small x lost significant digits (or became 0) and the product drifted far
+// from 1.
+func TestDivideRoundTrip(t *testing.T) {
+	one := decimal.New(1, 0)
+	for _, x := range []string{"3e30", "7e40", "1.5e-25", "3", "0.5"} {
+		xv := dec(t, x)
+		inv, err := Calculate(Divide, one, xv)
+		if err != nil {
+			t.Fatalf("1/%s: %v", x, err)
+		}
+		diff := inv.Mul(xv).Sub(one).Abs()
+		if diff.GreaterThan(decimal.New(1, -26)) {
+			t.Fatalf("(1/%s)*%s = %s, off from 1 by %s (precision lost)", x, x, inv.Mul(xv), diff)
+		}
+	}
+}
+
 // TestIsBinary documents the arity contract used by the transport layer.
 func TestIsBinary(t *testing.T) {
 	tests := []struct {

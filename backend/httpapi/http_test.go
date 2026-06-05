@@ -280,6 +280,41 @@ func TestMatrix_Row14_MagnitudeBoundary(t *testing.T) {
 	}
 }
 
+// Finding B regression (end-to-end): small-magnitude quotients keep their
+// precision over the wire instead of collapsing to "0" or shedding sig figs.
+// The audit found this defect via HTTP, so it is re-proven via HTTP.
+func TestSmallMagnitudePrecision_HTTP(t *testing.T) {
+	h := httpapi.New()
+	tests := []struct {
+		name       string
+		body       string
+		wantResult string // "" => assert nonzero + sig-fig count only
+		wantSig    int
+	}{
+		{"1/1e50 -> exact 1e-50", `{"operation":"divide","a":"1","b":"1e50"}`, "0." + strings.Repeat("0", 49) + "1", 1},
+		{"1/3e30 -> 28 sig figs", `{"operation":"divide","a":"1","b":"3e30"}`, "", 28},
+		{"2^-120 -> 28 sig figs", `{"operation":"power","a":"2","b":"-120"}`, "", 28},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, h, http.MethodPost, "/api/calculate", tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+			}
+			s := decodeSuccess(t, rec)
+			if s.Result == "0" {
+				t.Fatalf("%s collapsed to \"0\" (the Finding B bug)", tc.name)
+			}
+			if s.Precision != tc.wantSig {
+				t.Fatalf("precision = %d, want %d (result %q)", s.Precision, tc.wantSig, s.Result)
+			}
+			if tc.wantResult != "" && s.Result != tc.wantResult {
+				t.Fatalf("result = %q, want %q", s.Result, tc.wantResult)
+			}
+		})
+	}
+}
+
 // --- Happy path + health, for completeness. ---
 
 func TestHappyPath(t *testing.T) {
