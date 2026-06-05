@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"calculator/httpapi"
 )
@@ -210,6 +211,72 @@ func TestMatrix_Row13_ExceedsPrecisionIsDefined(t *testing.T) {
 	second := decodeSuccess(t, do(t, h, http.MethodPost, "/api/calculate", body))
 	if first.Result != second.Result {
 		t.Fatalf("non-deterministic result: %q vs %q", first.Result, second.Result)
+	}
+}
+
+// Row 14 (operational safety — new row): magnitude-driven DoS vectors are
+// rejected fast with 400 OPERAND_OUT_OF_RANGE. The magnitude of a decimal lives
+// in its exponent, which is nearly free in bytes, so MaxBytesReader does not
+// bound it; without the guard these requests hang the server while it
+// materializes a multi-billion-digit coefficient. Each request is run with a
+// hard deadline so a regression to a hang FAILS instead of stalling the suite.
+func TestMatrix_Row14_MagnitudeGuard_DoS(t *testing.T) {
+	h := httpapi.New()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"power 10^1e9 (PowBigInt bomb)", `{"operation":"power","a":"10","b":"1000000000"}`},
+		{"add 1e999999999 (exponent-align bomb)", `{"operation":"add","a":"1e999999999","b":"2"}`},
+		{"add giant negative exponent operand", `{"operation":"add","a":"1e-999999999","b":"2"}`},
+		{"power giant negative exponent", `{"operation":"power","a":"10","b":"-1000000000"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			type result struct {
+				code int
+				body string
+			}
+			done := make(chan result, 1)
+			go func() {
+				rec := do(t, h, http.MethodPost, "/api/calculate", tc.body)
+				done <- result{rec.Code, rec.Body.String()}
+			}()
+			select {
+			case r := <-done:
+				if r.code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400 (body: %s)", r.code, r.body)
+				}
+				var e errorBody
+				if err := json.Unmarshal([]byte(r.body), &e); err != nil {
+					t.Fatalf("not the {error,code} shape: %q", r.body)
+				}
+				if e.Code != "OPERAND_OUT_OF_RANGE" {
+					t.Fatalf("code = %q, want OPERAND_OUT_OF_RANGE", e.Code)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("request hung (>5s) — magnitude guard did not reject %q", tc.body)
+			}
+		})
+	}
+}
+
+// Row 14 boundary: a value exactly at the magnitude limit succeeds; one decade
+// past it is rejected. Mirrors the calc-level boundary test end-to-end.
+func TestMatrix_Row14_MagnitudeBoundary(t *testing.T) {
+	h := httpapi.New()
+
+	in := do(t, h, http.MethodPost, "/api/calculate", `{"operation":"multiply","a":"1e1000","b":"1"}`)
+	if in.Code != http.StatusOK {
+		t.Fatalf("1e1000 is at the limit and must be accepted: status %d (%s)", in.Code, in.Body.String())
+	}
+
+	out := do(t, h, http.MethodPost, "/api/calculate", `{"operation":"multiply","a":"1e1001","b":"1"}`)
+	if out.Code != http.StatusBadRequest {
+		t.Fatalf("1e1001 is past the limit and must be rejected: status %d", out.Code)
+	}
+	if got := decodeError(t, out).Code; got != "OPERAND_OUT_OF_RANGE" {
+		t.Fatalf("code = %q, want OPERAND_OUT_OF_RANGE", got)
 	}
 }
 

@@ -177,6 +177,45 @@ func TestSqrtRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMagnitudeGuard covers the operational-safety guard (matrix row 14):
+// out-of-range operands and oversized power exponents are rejected with
+// ErrOutOfRange before any computation, while values at the limit still
+// compute. This is what prevents the unbounded-materialization DoS.
+func TestMagnitudeGuard(t *testing.T) {
+	tests := []struct {
+		name    string
+		op      Operation
+		a, b    string
+		wantErr error // nil => must succeed
+	}{
+		{"operand a above max magnitude", Add, "1e1001", "2", ErrOutOfRange},
+		{"operand b above max magnitude", Add, "2", "1e1001", ErrOutOfRange},
+		{"operand below min magnitude", Add, "1e-1001", "2", ErrOutOfRange},
+		{"power exponent above cap", Power, "10", "1001", ErrOutOfRange},
+		{"power exponent below -cap", Power, "10", "-1001", ErrOutOfRange},
+		{"power huge low-magnitude exponent (1e9)", Power, "10", "1000000000", ErrOutOfRange},
+
+		// Boundary: exactly at the limit is accepted.
+		{"operand a at max magnitude", Add, "1e1000", "0", nil},
+		{"operand at min magnitude", Add, "1e-1000", "0", nil},
+		{"power exponent at cap", Power, "1", "1000", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Calculate(tc.op, dec(t, tc.a), dec(t, tc.b))
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Calculate(%s,%s,%s) = unexpected error %v", tc.op, tc.a, tc.b, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Calculate(%s,%s,%s) error = %v, want %v", tc.op, tc.a, tc.b, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestIsBinary documents the arity contract used by the transport layer.
 func TestIsBinary(t *testing.T) {
 	tests := []struct {

@@ -37,6 +37,7 @@ error→(status, code) mapping; `main.go` is wiring only.
 
 | Row | Test |
 |----|----|
+| 14 operational safety (magnitude guard) | `TestMatrix_Row14_MagnitudeGuard_DoS` + `TestMatrix_Row14_MagnitudeBoundary` (http) + `TestMagnitudeGuard` (calc) |
 | 1 unparseable JSON | `TestMatrix_ErrorRows/row1` + `TestMatrix_Row1_NoInternalLeak` (asserts no decoder leak) |
 | 2 empty body | `TestMatrix_ErrorRows/row2` |
 | 3 unknown op | `TestMatrix_ErrorRows/row3` (`UNKNOWN_OP`) |
@@ -50,6 +51,52 @@ error→(status, code) mapping; `main.go` is wiring only.
 | 11 oversized | `TestMatrix_Row11_OversizedPayload` (413, MaxBytesReader) |
 | 12 concurrent | `TestMatrix_Row12_Concurrent` (64 goroutines, validated under `-race`) |
 | 13 exceeds precision | `TestMatrix_Row13_ExceedsPrecisionIsDefined` (http) + `TestNonTerminatingCappedAtPrecision` (calc) |
+
+---
+
+## Post-audit fix — Finding C (magnitude-driven DoS)
+
+A hostile audit found that operand/result magnitude is driven by the decimal
+**exponent**, which costs almost no bytes, so `MaxBytesReader` does **not** bound
+it. Two trivially-reachable requests hung the server and grew memory without
+bound (observed ~857 MB RSS from two requests, connections held open):
+
+- `{"operation":"power","a":"10","b":"1000000000"}` — `PowBigInt` tries to
+  materialize a ~1e9-digit integer.
+- `{"operation":"add","a":"1e999999999","b":"2"}` — `Add` aligns exponents,
+  materializing a ~1e9-digit coefficient.
+
+**Fix (surgical, calc-layer guard before any computation; nothing else touched).**
+`Calculate` now calls `guardMagnitude` before `compute`, returning a sentinel
+that maps to **400 `OPERAND_OUT_OF_RANGE`** in the `{error,code}` shape — never a
+hang, never a 500. The check reads only the exponent and digit count, so it never
+materializes the coefficient it is protecting against.
+
+Limits chosen (both in `calc/calc.go`, documented as constants):
+
+- **`MaxMagnitude = 1000`** — every operand must satisfy
+  `1e-1000 <= |v| <= 1e1000` (zero always allowed). The bound is on the *order of
+  magnitude* (adjusted exponent = `exponent + numDigits - 1`), so worst-case
+  exponent alignment in `Add`/`Sub` materializes at most ~2000-digit coefficients.
+  1000 is far beyond any legitimate calculator input while keeping work bounded.
+- **`MaxPowerExponent = 1000`** — for `power`, `|exponent|` must be `<= 1000`.
+  This is a *separate* cap because a huge exponent like `1e9` (written
+  `"1000000000"`) is itself only order-of-magnitude 9, so `MaxMagnitude` does not
+  catch it; yet it is exactly what makes `PowBigInt` blow up. With base also
+  bounded by `MaxMagnitude`, the largest materializable power result is bounded.
+
+New error code: **`OPERAND_OUT_OF_RANGE`** (status 400). This is a **new
+operational-safety matrix row — row 14** (not in the original SPEC 13; the SPEC
+matrix had no DoS/operational-safety row). Recommend the evaluator add it to
+SPEC §"Unhappy-path matrix" as: *"operand/exponent magnitude beyond safe bound →
+400 `OPERAND_OUT_OF_RANGE`, fast, never hang/OOM."*
+
+Verification (live + tests): all four attack vectors now return `400
+OPERAND_OUT_OF_RANGE` in <1 ms; boundary `1e1000` succeeds, `1e1001` rejected;
+`go test -race ./...` and `go vet ./...` clean; calc coverage 94.4% (≥85%);
+normal ops (`1/3`, `√2`, `2^10`, `0.1+0.2`) unchanged; server RSS stayed ~12 MB
+under the attacks. **Scope:** precision logic, the float64/`power` question, and
+everything else were deliberately left untouched.
 
 ---
 

@@ -30,6 +30,7 @@ const (
 	codeNegativeSqrt    = "NEGATIVE_SQRT"
 	codeUndefinedResult = "UNDEFINED_RESULT"
 	codePayloadTooLarge = "PAYLOAD_TOO_LARGE"
+	codeOutOfRange      = "OPERAND_OUT_OF_RANGE"
 )
 
 // calcRequest is the POST /api/calculate body. Operands are pointers to
@@ -150,6 +151,8 @@ func writeCalcError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "unknown operation", codeUnknownOp)
 	case errors.Is(err, calc.ErrMissingOperand):
 		writeError(w, http.StatusBadRequest, "missing operand", codeMissingOperand)
+	case errors.Is(err, calc.ErrOutOfRange):
+		writeError(w, http.StatusBadRequest, "operand magnitude out of range", codeOutOfRange)
 	case errors.Is(err, calc.ErrUndefinedResult):
 		writeError(w, http.StatusBadRequest, "result is undefined for the given operands", codeUndefinedResult)
 	default:

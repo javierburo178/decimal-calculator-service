@@ -37,6 +37,25 @@ const guardDigits int32 = 16
 // significant digits at the output boundary.
 const workPrecision = Precision + guardDigits
 
+// MaxMagnitude bounds the order of magnitude of every operand: a value v is
+// accepted only when 10^-MaxMagnitude <= |v| <= 10^MaxMagnitude (zero is always
+// in range). This is an operational-safety guard, not a math policy. A decimal's
+// magnitude lives in its (one-byte-cheap) exponent field, so a tiny request body
+// like "1e999999999" passes MaxBytesReader yet would force Add/Sub to align
+// exponents into a ~1e9-digit coefficient — unbounded memory and a hung request.
+// Rejecting out-of-range operands up front guarantees nothing unbounded is ever
+// materialized.
+const MaxMagnitude int32 = 1000
+
+// MaxPowerExponent bounds |exponent| for the power operation specifically. Even
+// in-range operands can blow up multiplicatively: base**exp with a large integer
+// exponent makes PowBigInt materialize an enormous integer (10**1e9 never
+// returns). Capping the exponent keeps the result materialization bounded. A
+// huge exponent's magnitude (e.g. 1e9 written as "1000000000") is NOT caught by
+// MaxMagnitude — its order of magnitude is only 9 — so this separate cap is
+// required.
+const MaxPowerExponent int32 = 1000
+
 // Operation enumerates the supported operations.
 type Operation string
 
@@ -59,6 +78,7 @@ var (
 	ErrNegativeSqrt    = errors.New("square root of a negative number")
 	ErrMissingOperand  = errors.New("missing operand")
 	ErrUndefinedResult = errors.New("undefined result")
+	ErrOutOfRange      = errors.New("operand magnitude out of range")
 )
 
 // IsBinary reports whether op requires a second operand (b). It returns
@@ -79,11 +99,53 @@ func IsBinary(op Operation) (bool, error) {
 // ignored. The returned value is normalized to its minimal canonical form
 // (trailing fractional zeros removed without changing the value).
 func Calculate(op Operation, a, b decimal.Decimal) (decimal.Decimal, error) {
+	// Operational-safety guard: reject pathological-magnitude inputs BEFORE any
+	// arithmetic, so a tiny request body can never make the library materialize
+	// an unbounded coefficient (see MaxMagnitude / MaxPowerExponent).
+	if err := guardMagnitude(op, a, b); err != nil {
+		return decimal.Decimal{}, err
+	}
 	res, err := compute(op, a, b)
 	if err != nil {
 		return decimal.Decimal{}, err
 	}
 	return stripTrailingZeros(res), nil
+}
+
+// guardMagnitude rejects inputs whose magnitude would force an unbounded
+// materialization. It runs before compute and returns only sentinel errors
+// (ErrUnknownOperator for a bad op, ErrOutOfRange for a magnitude violation),
+// so every rejection still maps to a 4xx, never a hang and never a 500.
+func guardMagnitude(op Operation, a, b decimal.Decimal) error {
+	binary, err := IsBinary(op)
+	if err != nil {
+		return err
+	}
+	if !withinMagnitude(a) {
+		return ErrOutOfRange
+	}
+	if binary && !withinMagnitude(b) {
+		return ErrOutOfRange
+	}
+	// b is the exponent for power; cap it separately — a large integer exponent
+	// is itself low-magnitude but drives result size (10**1e9).
+	if op == Power && b.Abs().GreaterThan(decimal.New(int64(MaxPowerExponent), 0)) {
+		return ErrOutOfRange
+	}
+	return nil
+}
+
+// withinMagnitude reports whether d's order of magnitude is within
+// ±MaxMagnitude. The order of magnitude is the power of ten of the most
+// significant digit (adjusted exponent); both inputs are cheap to read and
+// never materialize the coefficient. Zero has no magnitude and is always in
+// range.
+func withinMagnitude(d decimal.Decimal) bool {
+	if d.IsZero() {
+		return true
+	}
+	adjExp := d.Exponent() + int32(d.NumDigits()) - 1
+	return adjExp <= MaxMagnitude && adjExp >= -MaxMagnitude
 }
 
 func compute(op Operation, a, b decimal.Decimal) (decimal.Decimal, error) {
