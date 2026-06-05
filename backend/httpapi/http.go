@@ -31,6 +31,7 @@ const (
 	codeUndefinedResult = "UNDEFINED_RESULT"
 	codePayloadTooLarge = "PAYLOAD_TOO_LARGE"
 	codeOutOfRange      = "OPERAND_OUT_OF_RANGE"
+	codeMethodNotAllow  = "METHOD_NOT_ALLOWED"
 )
 
 // calcRequest is the POST /api/calculate body. Operands are pointers to
@@ -65,11 +66,25 @@ func New() http.Handler { return NewWithLimit(DefaultMaxBytes) }
 func NewWithLimit(maxBytes int64) http.Handler {
 	h := &handler{maxBytes: maxBytes}
 	mux := http.NewServeMux()
-	// Go 1.22+ method-aware routing: a non-POST to /api/calculate returns 405
-	// automatically (with an Allow header), as does a non-GET to /health.
+	// Go 1.22+ method-aware routing. The method-specific patterns serve the
+	// valid verb; the path-only patterns are strictly less specific, so they
+	// catch every *other* method and emit our {error,code} JSON 405 instead of
+	// the mux's plain-text default — keeping the error shape consistent.
 	mux.HandleFunc("POST /api/calculate", h.calculate)
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("/api/calculate", methodNotAllowed(http.MethodPost))
+	mux.HandleFunc("/health", methodNotAllowed(http.MethodGet))
 	return mux
+}
+
+// methodNotAllowed returns a handler for a disallowed method on a route whose
+// only valid verb is allow. It preserves the Allow header and reuses the shared
+// JSON error helper so a 405 looks like every other error response.
+func methodNotAllowed(allow string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", codeMethodNotAllow)
+	}
 }
 
 type handler struct {

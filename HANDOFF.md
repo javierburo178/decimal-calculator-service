@@ -168,6 +168,40 @@ Tests added: `TestSmallMagnitudePrecision`, `TestDivideRoundTrip` (calc),
 
 ---
 
+## Post-audit fix — Finding D (405 error-shape inconsistency)
+
+The audit found that every error response used the `{error,code}` JSON shape
+**except** the 405: Go 1.22 method routing auto-emitted a plain-text
+`Method Not Allowed` body for a wrong method on `/api/calculate` (and `/health`),
+inconsistent with the documented contract. (This is the inconsistency previously
+flagged in §8 above.)
+
+**Fix (surgical, `httpapi/http.go` only).** Added a path-only catch-all per route
+that is strictly less specific than the method-specific pattern, so the valid
+verb still routes to its handler while every *other* method falls through to a
+small `methodNotAllowed` handler:
+
+```go
+mux.HandleFunc("POST /api/calculate", h.calculate)
+mux.HandleFunc("GET /health", h.health)
+mux.HandleFunc("/api/calculate", methodNotAllowed(http.MethodPost))
+mux.HandleFunc("/health", methodNotAllowed(http.MethodGet))
+```
+
+`methodNotAllowed` sets the `Allow` header and **reuses the existing `writeError`
+helper** (no duplicated encoding) to emit a 405 in the standard shape. New stable
+code: **`METHOD_NOT_ALLOWED`**. No router restructure, no framework.
+
+**Confirmed (live + tests):** `GET`/`PUT`/`DELETE` on `/api/calculate` →
+`405`, `Allow: POST`, body `{"error":"method not allowed","code":"METHOD_NOT_ALLOWED"}`;
+`POST /health` → `405`, `Allow: GET`, same shape. Regression: `POST /api/calculate`
+and `GET /health` still work. `TestMatrix_Row10_MethodNotAllowed` now asserts the
+JSON shape, the `code`, and the `Allow` header (not just status). `go test -race
+./...` and `go vet ./...` clean. **Scope:** only the 405 body; nothing else
+touched.
+
+---
+
 ## Decisions the SPEC left open (please scrutinize)
 
 ### 1. "28 significant digits" vs "28 decimal places" — I chose **significant digits**
@@ -256,11 +290,10 @@ in one call before parsing operands.
 - **Negative base, fractional exponent** (imaginary), and **`0 ** negative`**
   (infinity): not in the matrix. Mapped to 400 — `UNDEFINED_RESULT` and
   `DIVIDE_BY_ZERO` respectively — so they never become 500.
-- **405 body**: handled by Go 1.22+ method routing; the auto-405 returns a
-  plain-text body + `Allow` header (not the `{error,code}` JSON shape).
-  Customizing it would require a catch-all route. SPEC only requires the 405
-  status. **Minor inconsistency I chose to leave; flag if the JSON shape is
-  required on 405.**
+- **405 body**: **RESOLVED (Finding D closed)** — see "Post-audit fix — Finding
+  D" below. The 405 now returns the documented `{error,code}` JSON shape with
+  code `METHOD_NOT_ALLOWED`, `Allow` header preserved. *(Originally this returned
+  the mux's plain-text body; the audit flagged the inconsistency.)*
 
 ### 9. `MaxBytesReader` limit = 64 KiB (`DefaultMaxBytes`)
 Requests are tiny (operation + two decimal strings); 64 KiB leaves generous room
@@ -284,7 +317,9 @@ under `-race` with 64 concurrent requests).
    path that touches float at all; may or may not satisfy the non-negotiable as
    written.
 3. **`precision` field semantics** (decision #2) — constant 28 vs actual count.
-4. **405 returns plain text, not `{error,code}`** (decision #8).
+4. ~~**405 returns plain text, not `{error,code}`** (decision #8).~~ **CLOSED
+   (Finding D)** — 405 now uses the `{error,code}` shape; see "Post-audit fix —
+   Finding D".
 5. **Guard-digit edge case** (decision #5) — theoretical, documented.
 
 ## Not done (out of scope for Chunk 1 backend code)

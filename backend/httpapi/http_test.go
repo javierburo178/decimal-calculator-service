@@ -148,12 +148,20 @@ func TestMatrix_Row9_RoundingApplied(t *testing.T) {
 	}
 }
 
-// Row 10: a non-POST method on /api/calculate yields 405 (method routing).
+// Row 10: a non-POST method on /api/calculate yields 405, with the Allow header
+// preserved and the documented {error,code} JSON body (not the mux's plain-text
+// default) — same error shape as every other response.
 func TestMatrix_Row10_MethodNotAllowed(t *testing.T) {
 	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		rec := do(t, httpapi.New(), m, "/api/calculate", "")
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s /api/calculate status = %d, want 405", m, rec.Code)
+		}
+		if got := rec.Header().Get("Allow"); got != http.MethodPost {
+			t.Fatalf("%s /api/calculate Allow = %q, want POST", m, got)
+		}
+		if got := decodeError(t, rec).Code; got != "METHOD_NOT_ALLOWED" {
+			t.Fatalf("%s /api/calculate code = %q, want METHOD_NOT_ALLOWED (body: %s)", m, got, rec.Body.String())
 		}
 	}
 }
