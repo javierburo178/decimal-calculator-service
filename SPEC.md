@@ -38,7 +38,7 @@ divide/sqrt/fractional-power are inherently non-terminating in decimal -> explic
 
 ## Float-free boundary (honest scope of the no-float guarantee)
 
-The no-float64 guarantee is absolute for the money domain — the four core operations plus percentage never touch float64 at any point, operands and results included. Square root is also float-free: it is hand-rolled Newton-Raphson in pure decimal.
+The no-float64 guarantee applies to value computation: the four core operations, percentage, and sqrt never use float64 to compute any result digit — significands are pure decimal (sqrt is hand-rolled Newton-Raphson). The underlying library does use float64 in two places that never touch result digits: exact exponent-scale alignment (rescale) and digit-count estimation (NumDigits). These operate on magnitude/scale metadata, are exact for representable inputs, and cannot perturb the significand. We make the honest claim — no float64 in the computation of result digits — not the unverifiable absolute that float64 is absent from every library internal.
 
 The one exception is genuinely transcendental fractional power (x^y with non-integer y). shopspring/decimal computes this through Ln, which seeds its iteration with a float64 (math.Log of the operand) before refining the result back to the requested decimal precision. The float64 is a starting estimate for an iterative refinement, not a value that flows into the result — the returned digits are computed in decimal. We verified sqrt(2) and power(2, 0.5) produce the identical 28-significant-digit result, confirming the fractional-power path reaches the same precision as the float-free sqrt.
 
