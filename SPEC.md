@@ -65,9 +65,10 @@ Applies money-handling principles at single-operation level. NOT a banking syste
 | 11 | oversized payload | 413 via MaxBytesReader |
 | 12 | N concurrent requests | no data race (-race clean) |
 | 13 | divide exceeding max precision | defined behavior, documented, not silent garbage |
+| 14 | operand/exponent magnitude beyond safe bound | 400 code OPERAND_OUT_OF_RANGE, rejected before compute — fast, never hang/OOM |
 
 ## Definition of done — Backend (gate before frontend)
-- All 13 rows have passing tests.
+- All 14 rows have passing tests.
 - go test -race ./... clean. go vet ./... clean.
 - Coverage >= 85% on arithmetic package.
 - README documents stack decisions + money rationale + honest limits.

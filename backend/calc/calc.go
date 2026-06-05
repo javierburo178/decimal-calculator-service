@@ -200,9 +200,10 @@ func percentage(a, b decimal.Decimal) decimal.Decimal {
 }
 
 // sqrt computes the square root via Newton-Raphson in pure decimal arithmetic
-// (no float64 anywhere) and rounds to Precision significant digits at the
-// boundary. The iteration converges quadratically, so a handful of steps reach
-// workPrecision; the loop bound is a safety net, not the expected path.
+// (no float64 computes any result digit) and rounds to Precision significant
+// digits at the boundary. The iteration converges quadratically, so a handful
+// of steps reach workPrecision; the loop bound is a safety net, not the
+// expected path.
 func sqrt(a decimal.Decimal) (decimal.Decimal, error) {
 	switch a.Sign() {
 	case -1:
