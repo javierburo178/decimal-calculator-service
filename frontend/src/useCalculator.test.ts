@@ -27,7 +27,10 @@ describe('useCalculator', () => {
       await result.current.submit()
     })
 
-    expect(calculateMock).toHaveBeenCalledWith({ operation: 'add', a: '0.1', b: '0.2' })
+    expect(calculateMock).toHaveBeenCalledWith(
+      { operation: 'add', a: '0.1', b: '0.2' },
+      expect.any(AbortSignal),
+    )
     expect(result.current.result).toEqual({ result: '0.3', precision: 1 })
     expect(result.current.error).toBeNull()
   })
@@ -90,7 +93,46 @@ describe('useCalculator', () => {
       await result.current.submit()
     })
 
-    expect(calculateMock).toHaveBeenCalledWith({ operation: 'sqrt', a: '4', b: null })
+    expect(calculateMock).toHaveBeenCalledWith(
+      { operation: 'sqrt', a: '4', b: null },
+      expect.any(AbortSignal),
+    )
     expect(result.current.result).toEqual({ result: '2', precision: 1 })
+  })
+
+  it('a superseded in-flight request never overwrites newer state', async () => {
+    // Request A is slow (resolves manually); request B resolves immediately.
+    let resolveStale: (v: { result: string; precision: number }) => void = () => {}
+    const stalePromise = new Promise<{ result: string; precision: number }>((r) => {
+      resolveStale = r
+    })
+    calculateMock
+      .mockReturnValueOnce(stalePromise) // request A (slow)
+      .mockResolvedValueOnce({ result: '9', precision: 1 }) // request B (fast)
+
+    const { result } = renderHook(() => useCalculator())
+    act(() => result.current.setA('1'))
+    act(() => result.current.setB('2'))
+
+    // Start A; leave it pending.
+    let submitA: Promise<void> = Promise.resolve()
+    act(() => {
+      submitA = result.current.submit()
+    })
+
+    // User edits (aborts A), then submits B which resolves to "9".
+    act(() => result.current.setA('4'))
+    await act(async () => {
+      await result.current.submit()
+    })
+    expect(result.current.result).toEqual({ result: '9', precision: 1 })
+
+    // A resolves LATE with a stale value — it must be ignored, not repainted.
+    await act(async () => {
+      resolveStale({ result: 'STALE', precision: 99 })
+      await submitA
+    })
+    expect(result.current.result).toEqual({ result: '9', precision: 1 })
+    expect(result.current.error).toBeNull()
   })
 })

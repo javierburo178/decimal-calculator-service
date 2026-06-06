@@ -103,7 +103,10 @@ function isErrorBody(v: unknown): v is ErrorBody {
  * error (4xx with {error,code}) or `NetworkError` for anything else (unreachable
  * server, 5xx, unparseable body). Never returns a partial/ambiguous value.
  */
-export async function calculate(req: CalculateRequest): Promise<CalculateResult> {
+export async function calculate(
+  req: CalculateRequest,
+  signal?: AbortSignal,
+): Promise<CalculateResult> {
   let res: Response
   try {
     res = await fetch(`${API_URL}/api/calculate`, {
@@ -112,15 +115,20 @@ export async function calculate(req: CalculateRequest): Promise<CalculateResult>
       // Operands are already strings on `req`; JSON.stringify keeps them strings
       // (no number coercion) — the whole point of the decimal contract.
       body: JSON.stringify(req),
+      signal,
     })
-  } catch {
+  } catch (e) {
+    // An abort is intentional (a newer request superseded this one); let the
+    // caller recognize it instead of reporting a fake failure.
+    if (e instanceof DOMException && e.name === 'AbortError') throw e
     throw new NetworkError('Could not reach the calculator service. Is it running?')
   }
 
   let body: unknown
   try {
     body = await res.json()
-  } catch {
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e
     throw new NetworkError('The server returned a response that could not be read.')
   }
 

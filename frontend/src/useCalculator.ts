@@ -8,7 +8,7 @@
 // stays small and independently testable. Operands are named `a`/`b` to match
 // the backend contract.
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ApiError,
   NetworkError,
@@ -113,6 +113,19 @@ export function useCalculator(): UseCalculator {
 
   const bRequired = !isUnary(operation)
 
+  // Tracks the in-flight request so a newer action can supersede an older one.
+  const abortRef = useRef<AbortController | null>(null)
+
+  // Cancel any in-flight request (on input/operation change or unmount). The
+  // abort is intentional, so the superseded request must not surface an error.
+  const cancelInFlight = useCallback(() => {
+    if (abortRef.current !== null) {
+      abortRef.current.abort()
+      abortRef.current = null
+      setLoading(false)
+    }
+  }, [])
+
   // Any edit invalidates the previous output, so clear it to avoid showing a
   // stale result/error next to changed inputs.
   const clearOutput = useCallback(() => {
@@ -122,47 +135,56 @@ export function useCalculator(): UseCalculator {
 
   const setOperation = useCallback(
     (op: Operation) => {
+      cancelInFlight()
       setOperationState(op)
       setFieldErrors(NO_FIELD_ERRORS)
       clearOutput()
     },
-    [clearOutput],
+    [cancelInFlight, clearOutput],
   )
 
   const setA = useCallback(
     (value: string) => {
+      cancelInFlight()
       setAState(value)
       setFieldErrors((fe) => ({ ...fe, a: null }))
       clearOutput()
     },
-    [clearOutput],
+    [cancelInFlight, clearOutput],
   )
 
   const setB = useCallback(
     (value: string) => {
+      cancelInFlight()
       setBState(value)
       setFieldErrors((fe) => ({ ...fe, b: null }))
       clearOutput()
     },
-    [clearOutput],
+    [cancelInFlight, clearOutput],
   )
 
   const runCalculation = useCallback(async () => {
+    abortRef.current?.abort() // supersede any previous in-flight request
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setLoading(true)
     setError(null)
     setResult(null)
     try {
-      setResult(
-        await calculate({
-          operation,
-          a: a.trim(),
-          b: bRequired ? b.trim() : null,
-        }),
+      const res = await calculate(
+        { operation, a: a.trim(), b: bRequired ? b.trim() : null },
+        controller.signal,
       )
+      if (controller.signal.aborted) return // superseded — ignore the stale result
+      setResult(res)
     } catch (e) {
+      if (controller.signal.aborted) return // aborted intentionally — not an error
       setError(errorToMessage(e))
     } finally {
-      setLoading(false)
+      // Only the live request owns the loading flag; a superseded one must not
+      // flip it off under the newer request.
+      if (!controller.signal.aborted) setLoading(false)
     }
   }, [operation, a, b, bRequired])
 
@@ -176,6 +198,9 @@ export function useCalculator(): UseCalculator {
     setFieldErrors(NO_FIELD_ERRORS)
     await runCalculation()
   }, [a, b, bRequired, runCalculation, clearOutput])
+
+  // Abort an in-flight request if the component unmounts (no setState after).
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   return {
     operation,

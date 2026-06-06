@@ -103,9 +103,34 @@ presentation only (no fetch, no validation, no business rules).
    one line to change (`DECIMAL_RE` in `useCalculator.ts`).
 3. **Clearing the result on edit** (decision #5) — a UX judgment call; easy to
    reverse if you'd rather keep the last result visible until the next submit.
-4. **No request cancellation / debounce.** Submit is button-driven (not on every
-   keystroke), and the backend is fast, so I did not add AbortController. If
-   rapid double-submits matter, that's the addition.
+4. **Debounce.** Submit is button-driven (not on every keystroke), so there is
+   no input debounce. Not needed for a button-driven form.
+
+## Post-audit fix — Finding #1 (in-flight stale-result race)
+
+The audit found that the Calculate button is disabled while loading but the
+inputs are not, so editing a field mid-request could let a resolved older
+request repaint a result that no longer matched the inputs (no cancellation /
+request-id guard).
+
+**Fix (request cancellation via AbortController + supersede guard):**
+- `api.ts` — `calculate(req, signal?)` threads an optional `AbortSignal` into
+  `fetch`. An `AbortError` is re-thrown as-is (not wrapped in `NetworkError`), so
+  an intentional abort is never reported as a failure.
+- `useCalculator.ts` — the hook holds the in-flight `AbortController` in a ref.
+  Starting a new calculation aborts the previous one; changing any input or the
+  operation calls `cancelInFlight` (abort + clear loading); and each request
+  guards every state write with `if (controller.signal.aborted) return`, so a
+  superseded request can never call `setResult`/`setError`/`setLoading` —
+  covering even the case where the stale request had already resolved before the
+  abort landed. An unmount also aborts (no setState after unmount).
+
+**Test:** `useCalculator.test.ts` "a superseded in-flight request never
+overwrites newer state" resolves an older request *after* a newer one and
+asserts the older result is ignored. Verified by mutation: disabling the guard
+makes the test fail (stale value repaints); restoring it passes. All 17 tests
+pass; `tsc -b` strict and eslint stay clean. The three existing `toHaveBeenCalledWith`
+assertions were updated to also expect the new `AbortSignal` argument.
 
 ## Not done (flagged, possibly out of scope for Chunk 2)
 

@@ -37,7 +37,10 @@ describe('<App />', () => {
     await user.click(screen.getByRole('button', { name: /calculate/i }))
 
     expect(await screen.findByText('0.3')).toBeInTheDocument()
-    expect(calculateMock).toHaveBeenCalledWith({ operation: 'add', a: '0.1', b: '0.2' })
+    expect(calculateMock).toHaveBeenCalledWith(
+      { operation: 'add', a: '0.1', b: '0.2' },
+      expect.any(AbortSignal),
+    )
   })
 
   it('shows a friendly divide-by-zero message, never the raw code', async () => {
