@@ -44,7 +44,7 @@ cases considered.
 
 ### Spec-to-implementation (generator)
 > Implement the complete backend strictly against SPEC.md. Separate pure
-> arithmetic (`calc`, no HTTP, sentinel errors) from transport (`httpapi`:
+> arithmetic (`calc`, no HTTP, sentinel errors) from transport (`api`:
 > decode, validate, map domain errors to status+code). stdlib net/http only;
 > shopspring/decimal, never float64 for result digits; operands and results as
 > JSON strings; domain errors as 4xx with stable codes, never 500. Table-driven

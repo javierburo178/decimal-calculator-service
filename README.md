@@ -10,12 +10,12 @@ Monorepo with two independent deployables:
 .
 ├── backend/          Go microservice — autonomous (own module, Dockerfile, lifecycle)
 │   ├── calc/         pure decimal arithmetic; no HTTP; sentinel errors only
-│   ├── httpapi/      transport: decode, validate, map domain errors → status+code
+│   ├── api/          transport: decode, validate, map domain errors → status+code
 │   └── main.go       server wiring + graceful shutdown
 └── frontend/         React + TS app (consumes the API)
 ```
 
-The backend separates **logic from transport**: `calc` knows nothing about HTTP and is unit-tested in isolation; `httpapi` owns decoding, validation, and the error→(status, code) mapping. The split is what makes the arithmetic provable without spinning up a server.
+The backend separates **logic from transport**: `calc` knows nothing about HTTP and is unit-tested in isolation; `api` owns decoding, validation, and the error→(status, code) mapping. The split is what makes the arithmetic provable without spinning up a server.
 
 Monorepo is a deliberate choice for evaluation convenience (clone once, run with one compose file). The backend is a true microservice — its own module, Dockerfile, and lifecycle — and could be extracted to its own repo if the system grew to multiple services.
 
@@ -134,7 +134,7 @@ go test -cover ./calc/   # coverage (currently 94.6% on the arithmetic package)
 go vet ./...             # static analysis
 ```
 
-Tests are table-driven in `calc` (every operation, every sentinel error, half-to-even boundary proofs, sqrt round-trip) and `httptest`-based in `httpapi` (the full unhappy-path matrix by row, plus concurrency under `-race`).
+Tests are table-driven in `calc` (every operation, every sentinel error, half-to-even boundary proofs, sqrt round-trip) and `httptest`-based in `api` (the full unhappy-path matrix by row, plus concurrency under `-race`).
 
 **Process note.** The backend was built with a generator–evaluator loop: one pass implements against the spec, a second pass audits it adversarially in a clean context. The audit pass found a denial-of-service vector and a small-magnitude precision bug that 94% statement coverage did not — a reminder that coverage measures lines executed, not cases considered.
 

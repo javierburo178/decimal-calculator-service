@@ -1,4 +1,4 @@
-package httpapi_test
+package api_test
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"calculator/httpapi"
+	"calculator/api"
 )
 
 // do issues a request against the handler and returns the recorder.
@@ -52,7 +52,7 @@ func decodeSuccess(t *testing.T, rec *httptest.ResponseRecorder) successBody {
 // --- Unhappy-path matrix (SPEC). Each subtest is one numbered row. ---
 
 func TestMatrix_ErrorRows(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 
 	tests := []struct {
 		name       string
@@ -90,7 +90,7 @@ func TestMatrix_ErrorRows(t *testing.T) {
 
 // Row 1 detail: a malformed body must NOT leak internal/decoder detail.
 func TestMatrix_Row1_NoInternalLeak(t *testing.T) {
-	rec := do(t, httpapi.New(), http.MethodPost, "/api/calculate", `{"operation":}`)
+	rec := do(t, api.New(), http.MethodPost, "/api/calculate", `{"operation":}`)
 	e := decodeError(t, rec)
 	if strings.Contains(strings.ToLower(e.Error), "json") ||
 		strings.Contains(e.Error, "character") ||
@@ -102,7 +102,7 @@ func TestMatrix_Row1_NoInternalLeak(t *testing.T) {
 // Rows 8a/8b/8c: non-terminating results succeed and are reported with their
 // 28-significant-digit value and precision.
 func TestMatrix_Rows8_NonTerminatingSuccess(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 	const sqrt2 = "1.414213562373095048801688724"
 
 	tests := []struct {
@@ -137,7 +137,7 @@ func TestMatrix_Rows8_NonTerminatingSuccess(t *testing.T) {
 // unit tests; here we confirm the policy is applied end-to-end (2/3 rounds the
 // final digit up to 7).
 func TestMatrix_Row9_RoundingApplied(t *testing.T) {
-	rec := do(t, httpapi.New(), http.MethodPost, "/api/calculate", `{"operation":"divide","a":"2","b":"3"}`)
+	rec := do(t, api.New(), http.MethodPost, "/api/calculate", `{"operation":"divide","a":"2","b":"3"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -153,7 +153,7 @@ func TestMatrix_Row9_RoundingApplied(t *testing.T) {
 // default) — same error shape as every other response.
 func TestMatrix_Row10_MethodNotAllowed(t *testing.T) {
 	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
-		rec := do(t, httpapi.New(), m, "/api/calculate", "")
+		rec := do(t, api.New(), m, "/api/calculate", "")
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s /api/calculate status = %d, want 405", m, rec.Code)
 		}
@@ -169,7 +169,7 @@ func TestMatrix_Row10_MethodNotAllowed(t *testing.T) {
 // Row 11: an oversized body is rejected with 413 via MaxBytesReader, not OOM or
 // 500. We use a tiny limit so the test body stays small.
 func TestMatrix_Row11_OversizedPayload(t *testing.T) {
-	h := httpapi.NewWithLimit(16)
+	h := api.NewWithLimit(16)
 	big := `{"operation":"add","a":"1","b":"2","pad":"` + strings.Repeat("x", 1000) + `"}`
 	rec := do(t, h, http.MethodPost, "/api/calculate", big)
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -183,7 +183,7 @@ func TestMatrix_Row11_OversizedPayload(t *testing.T) {
 // Row 12: many concurrent requests share no mutable state. Run with -race to
 // detect data races; here we also assert every response is correct.
 func TestMatrix_Row12_Concurrent(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 	const n = 64
 	var wg sync.WaitGroup
 	wg.Add(n)
@@ -207,7 +207,7 @@ func TestMatrix_Row12_Concurrent(t *testing.T) {
 // defined, deterministic value — exactly Precision significant digits — not
 // silent garbage. Repeated calls are identical.
 func TestMatrix_Row13_ExceedsPrecisionIsDefined(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 	const body = `{"operation":"divide","a":"1","b":"3"}`
 	first := decodeSuccess(t, do(t, h, http.MethodPost, "/api/calculate", body))
 	if first.Precision != 28 {
@@ -229,7 +229,7 @@ func TestMatrix_Row13_ExceedsPrecisionIsDefined(t *testing.T) {
 // materializes a multi-billion-digit coefficient. Each request is run with a
 // hard deadline so a regression to a hang FAILS instead of stalling the suite.
 func TestMatrix_Row14_MagnitudeGuard_DoS(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 	tests := []struct {
 		name string
 		body string
@@ -272,7 +272,7 @@ func TestMatrix_Row14_MagnitudeGuard_DoS(t *testing.T) {
 // Row 14 boundary: a value exactly at the magnitude limit succeeds; one decade
 // past it is rejected. Mirrors the calc-level boundary test end-to-end.
 func TestMatrix_Row14_MagnitudeBoundary(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 
 	in := do(t, h, http.MethodPost, "/api/calculate", `{"operation":"multiply","a":"1e1000","b":"1"}`)
 	if in.Code != http.StatusOK {
@@ -292,7 +292,7 @@ func TestMatrix_Row14_MagnitudeBoundary(t *testing.T) {
 // precision over the wire instead of collapsing to "0" or shedding sig figs.
 // The audit found this defect via HTTP, so it is re-proven via HTTP.
 func TestSmallMagnitudePrecision_HTTP(t *testing.T) {
-	h := httpapi.New()
+	h := api.New()
 	tests := []struct {
 		name       string
 		body       string
@@ -326,7 +326,7 @@ func TestSmallMagnitudePrecision_HTTP(t *testing.T) {
 // --- Happy path + health, for completeness. ---
 
 func TestHappyPath(t *testing.T) {
-	rec := do(t, httpapi.New(), http.MethodPost, "/api/calculate", `{"operation":"add","a":"0.1","b":"0.2"}`)
+	rec := do(t, api.New(), http.MethodPost, "/api/calculate", `{"operation":"add","a":"0.1","b":"0.2"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -338,7 +338,7 @@ func TestHappyPath(t *testing.T) {
 
 func TestSqrtIgnoresB(t *testing.T) {
 	// b present but irrelevant for a unary op: must still succeed.
-	rec := do(t, httpapi.New(), http.MethodPost, "/api/calculate", `{"operation":"sqrt","a":"9","b":null}`)
+	rec := do(t, api.New(), http.MethodPost, "/api/calculate", `{"operation":"sqrt","a":"9","b":null}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -348,7 +348,7 @@ func TestSqrtIgnoresB(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	rec := do(t, httpapi.New(), http.MethodGet, "/health", "")
+	rec := do(t, api.New(), http.MethodGet, "/health", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}

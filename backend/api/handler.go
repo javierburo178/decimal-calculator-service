@@ -1,8 +1,7 @@
-// Package httpapi exposes the calculator over HTTP. It owns request decoding,
-// input validation, mapping of calc domain errors to stable HTTP status codes
-// and error codes, and JSON encoding. No arithmetic lives here — all math is in
-// the calc package.
-package httpapi
+// Package api exposes the calculator over HTTP: decoding, input validation,
+// mapping calc domain errors to status+code, and JSON encoding. No arithmetic
+// here — all math is in the calc package.
+package api
 
 import (
 	"encoding/json"
@@ -14,13 +13,11 @@ import (
 	"calculator/calc"
 )
 
-// DefaultMaxBytes bounds the request body size. A calculator request is tiny
-// (an operation plus two decimal strings); 64 KiB leaves generous room for very
-// long operands while preventing unbounded-body abuse. Enforced with
+// DefaultMaxBytes bounds the request body (requests are tiny). Enforced via
 // http.MaxBytesReader so an oversized body yields 413, never an OOM.
 const DefaultMaxBytes int64 = 64 << 10
 
-// Stable client-facing error codes. These are contract surface (see SPEC).
+// Stable client-facing error codes — contract surface (see SPEC).
 const (
 	codeBadRequest      = "BAD_REQUEST"
 	codeUnknownOp       = "UNKNOWN_OP"
@@ -34,19 +31,17 @@ const (
 	codeMethodNotAllow  = "METHOD_NOT_ALLOWED"
 )
 
-// calcRequest is the POST /api/calculate body. Operands are pointers to
-// distinguish an absent/null field from an empty string, which matters for the
-// missing-operand check. They cross the wire as STRINGS, not JSON numbers, so a
-// client cannot lose precision before the value ever reaches us.
+// calcRequest is the POST /api/calculate body. Operands are pointers so an
+// absent/null field is distinct from "" (the missing-operand check) and cross
+// the wire as strings, so no precision is lost before we parse them.
 type calcRequest struct {
 	Operation string  `json:"operation"`
 	A         *string `json:"a"`
 	B         *string `json:"b"`
 }
 
-// calcResponse is the success body. result is a STRING for the same
-// precision-preservation reason; precision is the number of significant digits
-// the result carries.
+// calcResponse is the success body; result is a string (same precision reason),
+// precision its significant-digit count.
 type calcResponse struct {
 	Result    string `json:"result"`
 	Precision int    `json:"precision"`
@@ -60,16 +55,13 @@ type errorResponse struct {
 // New returns the service handler with the default body-size limit.
 func New() http.Handler { return NewWithLimit(DefaultMaxBytes) }
 
-// NewWithLimit returns the service handler with a custom maximum request body
-// size. Exposed mainly so tests can exercise the oversized-payload path without
-// constructing a 64 KiB body.
+// NewWithLimit is New with a custom body-size limit, letting tests hit the 413
+// path without a 64 KiB body.
 func NewWithLimit(maxBytes int64) http.Handler {
 	h := &handler{maxBytes: maxBytes}
 	mux := http.NewServeMux()
-	// Go 1.22+ method-aware routing. The method-specific patterns serve the
-	// valid verb; the path-only patterns are strictly less specific, so they
-	// catch every *other* method and emit our {error,code} JSON 405 instead of
-	// the mux's plain-text default — keeping the error shape consistent.
+	// Path-only patterns are less specific than the method-specific ones, so they
+	// catch other methods and return our JSON 405 instead of the mux's plain text.
 	mux.HandleFunc("POST /api/calculate", h.calculate)
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("/api/calculate", methodNotAllowed(http.MethodPost))
@@ -77,9 +69,8 @@ func NewWithLimit(maxBytes int64) http.Handler {
 	return mux
 }
 
-// methodNotAllowed returns a handler for a disallowed method on a route whose
-// only valid verb is allow. It preserves the Allow header and reuses the shared
-// JSON error helper so a 405 looks like every other error response.
+// methodNotAllowed returns a 405 handler that sets Allow and reuses writeError,
+// so a wrong method looks like every other error response.
 func methodNotAllowed(allow string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Allow", allow)
@@ -105,8 +96,7 @@ func (h *handler) calculate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large", codePayloadTooLarge)
 			return
 		}
-		// Unparseable or empty body. Deliberately generic: we never echo the
-		// decoder error (no internal leak) and never return 500 for bad input.
+		// Unparseable/empty body: generic message, no decoder leak, never 500.
 		writeError(w, http.StatusBadRequest, "invalid request body", codeBadRequest)
 		return
 	}
@@ -153,9 +143,8 @@ func (h *handler) calculate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeCalcError maps a calc sentinel error to its stable HTTP status + code.
-// calc only ever returns sentinel (client-caused) errors, so every branch is a
-// 4xx; the default arm still avoids 500 rather than leaking an unexpected fault.
+// writeCalcError maps a calc sentinel error to its status+code. calc returns
+// only client-caused errors, so every branch is 4xx; the default still avoids 500.
 func writeCalcError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, calc.ErrDivideByZero):

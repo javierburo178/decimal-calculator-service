@@ -14,18 +14,18 @@ backend/
   calc/             pure decimal arithmetic — NO http. Sentinel errors. All math lives here.
     calc.go
     calc_test.go    table-driven: every op + every sentinel + half-to-even proofs + round-trip
-  httpapi/          transport only: decode, validate, map domain errors -> status+code, encode
-    http.go
-    http_test.go    httptest, all 13 matrix rows by number + happy path + health
+  api/              transport only: decode, validate, map domain errors -> status+code, encode
+    handler.go
+    handler_test.go httptest, all 13 matrix rows by number + happy path + health
 ```
 
 Architecture follows the requested split: `calc` is transport-agnostic and only
-ever returns sentinel errors; `httpapi` owns all HTTP concerns and the
+ever returns sentinel errors; `api` owns all HTTP concerns and the
 error→(status, code) mapping; `main.go` is wiring only.
 
 ### Results (raw)
 
-- `go test -race ./...` → **clean** (`calc` and `httpapi` both ok).
+- `go test -race ./...` → **clean** (`calc` and `api` both ok).
 - `go vet ./...` → **clean**.
 - `go test -cover ./calc/` → **94.6%** of statements (target ≥ 85%).
 - End-to-end smoke (live server on :8099): `divide 1/3` →
@@ -163,7 +163,7 @@ mathematically wrong (CLAUDE.md: never silently deviate). The `precision`
 response field reports the true sig-fig count, so it reads `1` for these.
 
 Tests added: `TestSmallMagnitudePrecision`, `TestDivideRoundTrip` (calc),
-`TestSmallMagnitudePrecision_HTTP` (httpapi). `go test -race ./...` and
+`TestSmallMagnitudePrecision_HTTP` (api). `go test -race ./...` and
 `go vet ./...` clean; calc coverage **94.6%**.
 
 ---
@@ -176,7 +176,7 @@ The audit found that every error response used the `{error,code}` JSON shape
 inconsistent with the documented contract. (This is the inconsistency previously
 flagged in §8 above.)
 
-**Fix (surgical, `httpapi/http.go` only).** Added a path-only catch-all per route
+**Fix (surgical, `api/handler.go` only).** Added a path-only catch-all per route
 that is strictly less specific than the method-specific pattern, so the valid
 verb still routes to its handler while every *other* method falls through to a
 small `methodNotAllowed` handler:
@@ -273,7 +273,7 @@ that touches it, and it would need a float-free `Ln`/`Exp`.
 
 ### 7. Operation arity lives in `calc.IsBinary`
 Whether `b` is required is domain knowledge, so it lives in `calc`, not
-`httpapi`. `IsBinary` doubles as the unknown-operation check (returns
+`api`. `IsBinary` doubles as the unknown-operation check (returns
 `ErrUnknownOperator`), letting the handler validate the operation and its arity
 in one call before parsing operands.
 

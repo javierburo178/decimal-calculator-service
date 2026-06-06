@@ -11,19 +11,18 @@ import (
 	"syscall"
 	"time"
 
-	"calculator/httpapi"
+	"calculator/api"
 )
 
 func main() {
 	addr := ":" + port()
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.New(),
+		Handler:           api.New(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// Trap SIGTERM/SIGINT so an orchestrator (or Ctrl-C) drains in-flight
-	// requests instead of cutting connections.
+	// Drain in-flight requests on SIGTERM/SIGINT instead of cutting connections.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
