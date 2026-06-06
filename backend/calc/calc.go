@@ -1,18 +1,11 @@
-// Package calc implements decimal-safe arithmetic for the calculator service.
+// Package calc implements decimal-safe arithmetic. It has no transport
+// concerns: every operation works on shopspring/decimal values and returns a
+// sentinel error for domain failures, which the transport layer maps to HTTP.
 //
-// It contains no transport concerns. Every operation works on
-// shopspring/decimal values (never float64) and returns one of the package's
-// sentinel errors for domain failures, which the transport layer maps to HTTP
-// status codes and stable error codes.
-//
-// Rounding policy (the single most important behavior of the service): results
-// that are not guaranteed to terminate — divide, sqrt, fractional power and
-// non-terminating negative-integer power — are rounded to Precision significant
-// digits using banker's rounding (half-to-even). Rounding happens exactly once,
-// at the output boundary, never on intermediate values; extra guard digits are
-// carried through the computation so that single boundary round is unbiased.
-// Exact operations (add, subtract, multiply, percentage, positive-integer
-// power) are returned at full precision with no rounding.
+// Non-terminating results (divide, sqrt, fractional/negative-integer power) are
+// rounded to Precision significant digits, half-to-even, once at the output
+// boundary; guard digits keep that single round unbiased. Exact operations are
+// returned at full precision.
 package calc
 
 import (
@@ -22,39 +15,26 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Precision is the number of significant digits retained for results that may
-// be non-terminating. Per SPEC this is a conscious, explicit choice — not a
-// library default.
+// Precision is the significant digits retained for non-terminating results — a
+// deliberate choice per SPEC, not a library default.
 const Precision int32 = 28
 
-// guardDigits are extra digits carried through intermediate computation so the
-// single banker's round at the output boundary is not biased by how an earlier
-// step happened to truncate. They are discarded by the final round.
+// guardDigits are extra digits carried through intermediate steps so the single
+// boundary round isn't biased by an earlier truncation.
 const guardDigits int32 = 16
 
-// workPrecision is the decimal-place precision used for intermediate
-// non-terminating computation, before the result is rounded to Precision
-// significant digits at the output boundary.
 const workPrecision = Precision + guardDigits
 
-// MaxMagnitude bounds the order of magnitude of every operand: a value v is
-// accepted only when 10^-MaxMagnitude <= |v| <= 10^MaxMagnitude (zero is always
-// in range). This is an operational-safety guard, not a math policy. A decimal's
-// magnitude lives in its (one-byte-cheap) exponent field, so a tiny request body
-// like "1e999999999" passes MaxBytesReader yet would force Add/Sub to align
-// exponents into a ~1e9-digit coefficient — unbounded memory and a hung request.
-// Rejecting out-of-range operands up front guarantees nothing unbounded is ever
-// materialized.
-const MaxMagnitude int32 = 1000
-
-// MaxPowerExponent bounds |exponent| for the power operation specifically. Even
-// in-range operands can blow up multiplicatively: base**exp with a large integer
-// exponent makes PowBigInt materialize an enormous integer (10**1e9 never
-// returns). Capping the exponent keeps the result materialization bounded. A
-// huge exponent's magnitude (e.g. 1e9 written as "1000000000") is NOT caught by
-// MaxMagnitude — its order of magnitude is only 9 — so this separate cap is
-// required.
-const MaxPowerExponent int32 = 1000
+// MaxMagnitude / MaxPowerExponent are operational-safety guards, not math.
+// Magnitude lives in the (cheap) exponent field, so a tiny body like
+// "1e999999999" passes MaxBytesReader yet would force a multi-billion-digit
+// coefficient. We bound the operand magnitude, and — separately — the power
+// exponent, since a large exponent is itself low-magnitude (1e9 = "1000000000",
+// order 9) but blows up the result.
+const (
+	MaxMagnitude     int32 = 1000
+	MaxPowerExponent int32 = 1000
+)
 
 // Operation enumerates the supported operations.
 type Operation string
@@ -69,9 +49,8 @@ const (
 	Percentage Operation = "percentage"
 )
 
-// Sentinel domain errors. The transport layer matches these with errors.Is to
-// produce stable HTTP error codes. None of them represent a server fault; they
-// are all caused by client input and must map to 4xx, never 500.
+// Sentinel domain errors — all client-caused, matched with errors.Is by the
+// transport layer and mapped to 4xx (never 500).
 var (
 	ErrUnknownOperator = errors.New("unknown operation")
 	ErrDivideByZero    = errors.New("division by zero")
@@ -81,9 +60,8 @@ var (
 	ErrOutOfRange      = errors.New("operand magnitude out of range")
 )
 
-// IsBinary reports whether op requires a second operand (b). It returns
-// ErrUnknownOperator for unrecognized operations, so a caller can validate the
-// operation and discover its arity in a single step.
+// IsBinary reports whether op needs operand b, returning ErrUnknownOperator for
+// an unrecognized op so callers validate and find arity in one step.
 func IsBinary(op Operation) (bool, error) {
 	switch op {
 	case Add, Subtract, Multiply, Divide, Power, Percentage:
@@ -95,13 +73,9 @@ func IsBinary(op Operation) (bool, error) {
 	}
 }
 
-// Calculate evaluates op on operands a and b. For unary operations (Sqrt) b is
-// ignored. The returned value is normalized to its minimal canonical form
-// (trailing fractional zeros removed without changing the value).
+// Calculate evaluates op on a and b (b ignored for unary ops). The result is
+// normalized (trailing fractional zeros stripped, value unchanged).
 func Calculate(op Operation, a, b decimal.Decimal) (decimal.Decimal, error) {
-	// Operational-safety guard: reject pathological-magnitude inputs BEFORE any
-	// arithmetic, so a tiny request body can never make the library materialize
-	// an unbounded coefficient (see MaxMagnitude / MaxPowerExponent).
 	if err := guardMagnitude(op, a, b); err != nil {
 		return decimal.Decimal{}, err
 	}
@@ -112,10 +86,8 @@ func Calculate(op Operation, a, b decimal.Decimal) (decimal.Decimal, error) {
 	return stripTrailingZeros(res), nil
 }
 
-// guardMagnitude rejects inputs whose magnitude would force an unbounded
-// materialization. It runs before compute and returns only sentinel errors
-// (ErrUnknownOperator for a bad op, ErrOutOfRange for a magnitude violation),
-// so every rejection still maps to a 4xx, never a hang and never a 500.
+// guardMagnitude rejects pathological-magnitude inputs before any arithmetic, so
+// nothing unbounded is ever materialized. Returns only sentinel errors.
 func guardMagnitude(op Operation, a, b decimal.Decimal) error {
 	binary, err := IsBinary(op)
 	if err != nil {
@@ -127,24 +99,19 @@ func guardMagnitude(op Operation, a, b decimal.Decimal) error {
 	if binary && !withinMagnitude(b) {
 		return ErrOutOfRange
 	}
-	// b is the exponent for power; cap it separately — a large integer exponent
-	// is itself low-magnitude but drives result size (10**1e9).
 	if op == Power && b.Abs().GreaterThan(decimal.New(int64(MaxPowerExponent), 0)) {
 		return ErrOutOfRange
 	}
 	return nil
 }
 
-// withinMagnitude reports whether d's order of magnitude is within
-// ±MaxMagnitude. The order of magnitude is the power of ten of the most
-// significant digit (adjusted exponent); both inputs are cheap to read and
-// never materialize the coefficient. Zero has no magnitude and is always in
-// range.
+// withinMagnitude reports whether |d| is within 10^±MaxMagnitude (zero always
+// in range), reading only exponent and digit count — never the coefficient.
 func withinMagnitude(d decimal.Decimal) bool {
 	if d.IsZero() {
 		return true
 	}
-	adjExp := d.Exponent() + int32(d.NumDigits()) - 1
+	adjExp := adjustedExponent(d)
 	return adjExp <= MaxMagnitude && adjExp >= -MaxMagnitude
 }
 
@@ -173,17 +140,10 @@ func div(a, b decimal.Decimal) (decimal.Decimal, error) {
 	if b.IsZero() {
 		return decimal.Decimal{}, ErrDivideByZero
 	}
-	// Carry the intermediate at workPrecision *significant* digits, not a fixed
-	// number of decimal places. A small-magnitude quotient (|q| << 1) has its
-	// most-significant digit far below the decimal point, so a fixed-place
-	// DivRound would discard real significant digits before the boundary round
-	// ever sees them — 1/1e50 would collapse to 0. We estimate the quotient's
-	// adjusted exponent from the operands (exact to within 1, which the guard
-	// digits absorb) and convert "workPrecision significant digits" into the
-	// equivalent decimal-place count: places = workPrecision - 1 - qAdjExp.
-	// Clamp so that |q| >= 1 keeps the original place count — those results were
-	// already correct and must stay byte-identical. Rounding still happens
-	// exactly once, at the boundary, half-to-even.
+	// Carry workPrecision *significant* digits, not fixed decimal places: a
+	// small quotient (|q| << 1) would otherwise lose real digits before the
+	// boundary round (1/1e50 -> 0). Estimate q's exponent from the operands
+	// (exact within 1, absorbed by guard digits) and convert to a place count.
 	places := workPrecision - 1 - (adjustedExponent(a) - adjustedExponent(b))
 	if places < workPrecision {
 		places = workPrecision
@@ -192,18 +152,15 @@ func div(a, b decimal.Decimal) (decimal.Decimal, error) {
 	return roundSignificant(q, Precision), nil
 }
 
-// percentage computes a * b / 100. Dividing by 100 only shifts the decimal
-// point, so the result is exact; we multiply by 0.01 (exact) rather than
-// dividing (which would be capped by the library's division precision).
+// percentage computes a*b/100 exactly by multiplying by 0.01 (a shift), avoiding
+// the library's division-precision cap.
 func percentage(a, b decimal.Decimal) decimal.Decimal {
 	return a.Mul(b).Mul(decimal.New(1, -2))
 }
 
-// sqrt computes the square root via Newton-Raphson in pure decimal arithmetic
-// (no float64 computes any result digit) and rounds to Precision significant
-// digits at the boundary. The iteration converges quadratically, so a handful
-// of steps reach workPrecision; the loop bound is a safety net, not the
-// expected path.
+// sqrt is Newton-Raphson in pure decimal (no float64 in any result digit),
+// rounded to Precision at the boundary. Quadratic convergence reaches
+// workPrecision in a few steps; the loop bound is just a safety net.
 func sqrt(a decimal.Decimal) (decimal.Decimal, error) {
 	switch a.Sign() {
 	case -1:
@@ -213,15 +170,13 @@ func sqrt(a decimal.Decimal) (decimal.Decimal, error) {
 	}
 
 	half := decimal.New(5, -1) // 0.5
-	// Initial guess ~ 10^(adjExp/2): the right order of magnitude so the
-	// quadratically-convergent iteration needs only a few steps.
-	adjExp := a.Exponent() + int32(a.NumDigits()) - 1
+	// Seed at the right order of magnitude (~10^(adjExp/2)) for fast convergence.
+	adjExp := adjustedExponent(a)
 	x := decimal.New(1, adjExp/2)
 	threshold := decimal.New(1, -workPrecision)
 
 	for i := 0; i < 100; i++ {
-		// x_{n+1} = (x_n + a/x_n) / 2
-		next := x.Add(a.DivRound(x, workPrecision)).Mul(half)
+		next := x.Add(a.DivRound(x, workPrecision)).Mul(half) // (x + a/x) / 2
 		if next.Sub(x).Abs().LessThanOrEqual(threshold) {
 			x = next
 			break
@@ -232,22 +187,18 @@ func sqrt(a decimal.Decimal) (decimal.Decimal, error) {
 }
 
 func pow(base, exp decimal.Decimal) (decimal.Decimal, error) {
-	// x ** 0 = 1. We adopt the common convention 0 ** 0 = 1 rather than
-	// erroring, to avoid surprising a caller on a case the SPEC does not list.
 	if exp.IsZero() {
-		return decimal.New(1, 0), nil
+		return decimal.New(1, 0), nil // adopt 0**0 = 1
 	}
 
 	if exp.IsInteger() {
 		if exp.Sign() > 0 {
-			// Positive integer exponent: exact repeated multiplication.
 			return base.PowBigInt(exp.BigInt())
 		}
-		// Negative integer exponent: 1 / base**|exp|. The power itself is
-		// exact, but the reciprocal may be non-terminating (e.g. 3**-1), so it
-		// goes through the divide policy (28 sig figs, half-to-even).
+		// Negative integer: 1 / base**|exp|; the reciprocal may be
+		// non-terminating, so route it through the divide policy.
 		if base.IsZero() {
-			return decimal.Decimal{}, ErrDivideByZero // 1/0
+			return decimal.Decimal{}, ErrDivideByZero
 		}
 		denom, err := base.PowBigInt(new(big.Int).Abs(exp.BigInt()))
 		if err != nil {
@@ -256,12 +207,12 @@ func pow(base, exp decimal.Decimal) (decimal.Decimal, error) {
 		return div(decimal.New(1, 0), denom)
 	}
 
-	// Fractional exponent: transcendental, same precision policy as sqrt.
+	// Fractional exponent: same precision policy as sqrt.
 	if base.IsNegative() {
-		return decimal.Decimal{}, ErrUndefinedResult // would be imaginary
+		return decimal.Decimal{}, ErrUndefinedResult // imaginary
 	}
 	if base.IsZero() {
-		return decimal.Zero, nil // 0 ** (positive fractional) = 0
+		return decimal.Zero, nil
 	}
 	res, err := base.PowWithPrecision(exp, workPrecision)
 	if err != nil {
@@ -270,10 +221,8 @@ func pow(base, exp decimal.Decimal) (decimal.Decimal, error) {
 	return roundSignificant(res, Precision), nil
 }
 
-// roundSignificant rounds d to sig significant digits using banker's rounding
-// (half-to-even). shopspring rounds by decimal place, so we translate "sig
-// significant digits" into the equivalent place via the adjusted exponent (the
-// power of ten of the most-significant digit).
+// roundSignificant rounds d to sig significant digits, half-to-even. shopspring
+// rounds by decimal place, so we convert via the adjusted exponent.
 func roundSignificant(d decimal.Decimal, sig int32) decimal.Decimal {
 	if d.IsZero() {
 		return decimal.Zero
@@ -282,18 +231,14 @@ func roundSignificant(d decimal.Decimal, sig int32) decimal.Decimal {
 	return d.RoundBank(places)
 }
 
-// adjustedExponent returns the power of ten of d's most-significant digit (its
-// order of magnitude). It reads only the exponent and digit count, so it never
-// materializes the coefficient. Behaviour for d == 0 is unspecified (callers
-// guard zero separately).
+// adjustedExponent is the power of ten of d's most-significant digit. Cheap
+// (no coefficient materialization); undefined for zero (callers guard it).
 func adjustedExponent(d decimal.Decimal) int32 {
 	return d.Exponent() + int32(d.NumDigits()) - 1
 }
 
-// stripTrailingZeros returns d with trailing zeros in the fractional part
-// removed, without changing its value (0.5000 -> 0.5, 20.00 -> 20). Zeros in
-// the integer part are preserved (100 stays 100). This yields a minimal
-// canonical textual result; it is normalization, not rounding.
+// stripTrailingZeros removes trailing fractional zeros without changing the
+// value (0.5000 -> 0.5, 20.00 -> 20); integer-part zeros stay (100 -> 100).
 func stripTrailingZeros(d decimal.Decimal) decimal.Decimal {
 	if d.IsZero() {
 		return decimal.Zero
