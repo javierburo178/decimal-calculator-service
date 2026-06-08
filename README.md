@@ -1,11 +1,10 @@
 # Decimal-Safe Calculator Service
 
-A full-stack calculator with a Go backend microservice and a React + TypeScript frontend. Arithmetic runs server-side on arbitrary-precision decimals (`shopspring/decimal`), not float64 — so `0.1 + 0.2` returns exactly `0.3`, and results carry 28 significant figures. Built as a take-home; the calculator is the vehicle, the focus is architecture, failure handling, and trade-off reasoning.
+A full-stack calculator with a Go backend microservice and a React + TypeScript frontend. Arithmetic runs server-side on arbitrary-precision decimals (`shopspring/decimal`), not float64 — so `0.1 + 0.2` returns exactly `0.3`, and results carry 28 significant figures.
 
 ## Architecture
 
 Monorepo with two independent deployables:
-
 ```
 .
 ├── backend/          Go microservice — autonomous (own module, Dockerfile, lifecycle)
@@ -98,7 +97,7 @@ curl -sX GET localhost:8080/api/calculate
 
 ## Design decisions
 
-**Decimal, not float64.** `float64` can't represent base-10 fractions exactly: `0.1 + 0.2` yields `0.30000000000000004`. Harmless once, but accumulated across many operations it drifts — unacceptable for anything money-adjacent. All arithmetic uses `shopspring/decimal` (base-10), so results are exact. This is the single most consequential decision; everything below follows from it.
+**Decimal, not float64.** `float64` can't represent base-10 fractions exactly: `0.1 + 0.2` yields `0.30000000000000004`. Harmless once, but accumulated across many operations it drifts unacceptable for anything money-adjacent. All arithmetic uses `shopspring/decimal` (base-10), so results are exact. This is the single most consequential decision; everything below follows from it.
 
 **Operands and results cross the API as strings, not JSON numbers.** A client that sends `0.1` as a JSON number has *already* lost precision before the request leaves the browser — JSON numbers are IEEE-754 floats. Sending `"0.1"` as a string keeps the value exact end to end. Same on the way back: the result is a string (Stripe's API does this for the same reason). A `precision` field reports the significant figures carried.
 
@@ -118,15 +117,15 @@ The decimal choice is the foundation; these are the policies built on it.
 
 **Precision is part of the contract.** Non-terminating results (`1/3`, `√2`, fractional powers) are capped at 28 significant figures — a conscious, documented choice, not a library default. Small-magnitude results keep their full 28 figures down to the operand range (`1/1e50` returns `1e-50`, not `0`). The response reports the `precision` actually carried.
 
-**The float-free boundary, stated honestly.** No `float64` is used to compute any result digit — the four core operations, percentage, and `sqrt` (hand-rolled Newton-Raphson) are pure decimal. The one exception is transcendental fractional power (`x^y`, non-integer `y`), where the library seeds an iteration with a `float64` before refining back to decimal; the seed never flows into the result digits. I document this single seam rather than claim an absolute ("no float64 anywhere") that no decimal library on real hardware can honestly guarantee.
+**The float-free boundary, stated honestly.** No `float64` is used to compute any result digit the four core operations, percentage, and `sqrt` (hand-rolled Newton-Raphson) are pure decimal. The one exception is transcendental fractional power (`x^y`, non-integer `y`), where the library seeds an iteration with a `float64` before refining back to decimal; the seed never flows into the result digits. I document this single seam rather than claim an absolute ("no float64 anywhere") that no decimal library on real hardware can honestly guarantee.
 
 ## Scope boundaries (conscious, not accidental)
 
-The hard part of scoping isn't what to build — it's what to leave out and say so. These are deliberate omissions for a single-purpose service, each with the condition that would change the call.
+The hard part of scoping isn't what to build it's what to leave out and say so. These are deliberate omissions for a single-purpose service, each with the condition that would change the call.
 
 **Result-magnitude hardening.** Operand magnitude and power exponent are each bounded (rejecting unbounded-memory inputs with a 400). Their *product* is still reachable — `1e1000 ^ 1000` computes a ~1M-digit result: bounded and fast (~60ms), not the unbounded hang the guard removed. A defense-in-depth follow-up would bound the *result* magnitude directly. Left as a documented, lower-severity item.
 
-**Configurable precision.** Precision is a single documented constant (28). A real multi-currency system would need per-currency scale (USD 2, JPY 0, BHD 3) and likely a precision *context* object. I did not build that abstraction — for one general-purpose calculator it's premature, and a configurable knob is surface to maintain and test. The constant is named and isolated; extracting a context is a small, deliberate change *if* the requirement arrives.
+**Configurable precision.** Precision is a single documented constant (28). A real multi-currency system would need per-currency scale (USD 2, JPY 0, BHD 3) and likely a precision *context* object. I did not build that abstraction. For one general-purpose calculator it's premature, and a configurable knob is surface to maintain and test. The constant is named and isolated; extracting a context is a small, deliberate change *if* the requirement arrives.
 
 **Observability.** Errors are typed, but there's no structured logging, metrics, or tracing. For production I'd add structured logs on the non-convergence and out-of-range paths and latency metrics per operation. Out of scope for a take-home; noted as the first thing I'd add for a real deployment.
 
@@ -144,8 +143,8 @@ go vet ./...             # static analysis
 
 Tests are table-driven in `calc` (every operation, every sentinel error, half-to-even boundary proofs, sqrt round-trip) and `httptest`-based in `api` (the full unhappy-path matrix by row, plus concurrency under `-race`).
 
-**Process note.** The backend was built with a generator–evaluator loop: one pass implements against the spec, a second pass audits it adversarially in a clean context. The audit pass found a denial-of-service vector and a small-magnitude precision bug that 94% statement coverage did not — a reminder that coverage measures lines executed, not cases considered.
+**Process note.** The backend was built with a generator–evaluator loop: one pass implements against the spec, a second pass audits it adversarially in a clean context. The audit pass found a denial-of-service vector and a small-magnitude precision bug that 94% statement coverage did not a reminder that coverage measures lines executed, not cases considered.
 
 ## Honest limits
 
-This applies money-handling *principles* at the level of a single operation — exact decimals, explicit rounding, precision as a contract. It is **not** a banking or ledger system. A production financial system additionally needs double-entry accounting, transactional atomicity, idempotency keys, an audit trail, and reconciliation. Those are out of scope here by design; the point of this service is correct, well-reasoned arithmetic at the unit level, not a system of record.
+This applies money-handling *principles* at the level of a single operation exact decimals, explicit rounding, precision as a contract. It is **not** a banking or ledger system. A production financial system additionally needs double-entry accounting, transactional atomicity, idempotency keys, an audit trail, and reconciliation. Those are out of scope here by design; the point of this service is correct, well-reasoned arithmetic at the unit level, not a system of record.
