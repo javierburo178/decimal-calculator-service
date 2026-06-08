@@ -34,10 +34,18 @@ go run .                 # serves on :8080
 Configurable via `PORT` (e.g. `PORT=9090 go run .`).
 
 ### Frontend
-[Frontend: pendiente Chunk 2 — cómo levantar el dev server y la env var del API]
+```bash
+cd frontend
+npm install
+npm run dev               # Vite dev server on http://localhost:5173
+```
+The frontend reads `VITE_API_URL` (default `http://localhost:8080`). For local dev with the backend running on :8080, no config is needed. See `frontend/.env.example`.
 
 ### Both, via Docker
-[Docker: pendiente — docker compose up levanta backend + frontend]
+```bash
+docker compose up --build
+```
+Starts both services: the API on http://localhost:8080 and the frontend on http://localhost:3000. The frontend is served by nginx, which proxies `/api` to the backend (same-origin, no CORS). Open http://localhost:3000.
 
 ## API
 
